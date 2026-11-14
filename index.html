@@ -737,7 +737,7 @@ function onModel(gltf) {
 function loadModel() {
   if (!T.GLTFLoader || !window.MeshoptDecoder) { modelFailed = true; return; }
   const go = () => {
-    const sc = document.createElement('script'); sc.src = 'car_c8v3.js';
+    const sc = document.createElement('script'); sc.src = 'car_c8v3.js?v=c8-2';
     sc.onload = () => {
       try {
         const bin = atob(window.CAR_GLB_B64), buf = new Uint8Array(bin.length);

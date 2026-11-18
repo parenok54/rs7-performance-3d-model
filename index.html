@@ -784,13 +784,36 @@ function buildSpoiler(g) {
   lid.geometry = build(outK);
   const lipGeo = build(outL);
   // front-top edge of the lip (in the trunk group's space) is the hinge
-  let fx = -Infinity, fy = -Infinity; const lp = lipGeo.attributes.position;
-  for (let i = 0; i < lp.count; i++) { v.fromBufferAttribute(lp, i).applyMatrix4(lid.matrix); fx = Math.max(fx, v.x); fy = Math.max(fy, v.y); }
+  let fx = -Infinity, fy = -Infinity, ly = Infinity; const lp = lipGeo.attributes.position;
+  for (let i = 0; i < lp.count; i++) { v.fromBufferAttribute(lp, i).applyMatrix4(lid.matrix); fx = Math.max(fx, v.x); fy = Math.max(fy, v.y); ly = Math.min(ly, v.y); }
   // hinge on the front edge of the lip; the part rises and tilts its trailing edge up
   const pivot = new T.Group(); pivot.position.set(fx, fy, 0); g.add(pivot);
   const sp = new T.Mesh(lipGeo, paint);
   sp.position.copy(lid.position).sub(pivot.position); sp.quaternion.copy(lid.quaternion); sp.scale.copy(lid.scale);
   sp.castShadow = sp.receiveShadow = true; pivot.add(sp);
+  // other boot-lid parts mounted on the lip (the Audi rings share a mesh with the 3rd brake light housing):
+  // move the triangles that sit fully on the lip, above the light bar, onto the spoiler
+  g.children.slice().forEach(o => {
+    if (!o.isMesh || o === lid || o.material === paint) return;
+    const gm = o.geometry, ps = gm.attributes.position, qq = qOf(ps), m = o.count || ps.count;
+    o.updateMatrix();
+    const cnt = ps.count, ox = new Float32Array(cnt), oy = new Float32Array(cnt);
+    for (let i = 0; i < cnt; i++) { v.set(ps.getX(i) * qq, ps.getY(i) * qq, ps.getZ(i) * qq).applyMatrix4(o.matrix); ox[i] = v.x; oy[i] = v.y; }
+    const ix = gm.index ? gm.index.array : Array.from({ length: cnt }, (_, i) => i), stay = [], go = [];
+    // group triangles into connected pieces, move whole pieces that lie entirely on the lip
+    const par = new Int32Array(cnt).map((_, i) => i), find = k => { while (par[k] !== k) { par[k] = par[par[k]]; k = par[k]; } return k; };
+    for (let t = 0; t < ix.length; t += 3) { const a = find(ix[t]); par[find(ix[t + 1])] = a; par[find(ix[t + 2])] = a; }
+    const bad = new Uint8Array(cnt);
+    for (let i = 0; i < cnt; i++) if (!(ox[i] < cut && oy[i] > ly - 0.01)) bad[find(i)] = 1;
+    for (let t = 0; t < ix.length; t += 3) (bad[find(ix[t])] ? stay : go).push(ix[t], ix[t + 1], ix[t + 2]);
+    if (!go.length) return;
+    const sub = new T.BufferGeometry(); Object.keys(gm.attributes).forEach(k => sub.setAttribute(k, gm.attributes[k])); sub.setIndex(go);
+    if (gm.boundingBox) sub.boundingBox = gm.boundingBox.clone(); if (gm.boundingSphere) sub.boundingSphere = gm.boundingSphere.clone();
+    if (stay.length) gm.setIndex(stay); else o.visible = false;
+    const c = new T.Mesh(sub, o.material);
+    c.position.copy(o.position).sub(pivot.position); c.quaternion.copy(o.quaternion); c.scale.copy(o.scale);
+    c.castShadow = c.receiveShadow = true; pivot.add(c);
+  });
   // dark recess that shows under the raised spoiler
   const recess = new T.Mesh(lipGeo, new T.MeshStandardMaterial({ color: 0x040405, roughness: 0.9, metalness: 0, side: T.DoubleSide }));
   recess.position.copy(lid.position); recess.position.y -= 0.008; recess.quaternion.copy(lid.quaternion); recess.scale.copy(lid.scale);

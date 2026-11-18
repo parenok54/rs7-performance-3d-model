@@ -309,8 +309,13 @@ const rimMat = new T.MeshStandardMaterial({ color: 0x3a3e46, metalness: 0.9, rou
 const discMat = new T.MeshStandardMaterial({ color: 0x4d5058, metalness: 0.6, roughness: 0.55 });
 const caliperMat = new T.MeshPhysicalMaterial({ color: 0x8e0a18, metalness: 0.2, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.05 });
 const drl = new T.MeshStandardMaterial({ color: 0xffffff, emissive: 0xdfe8ff, emissiveIntensity: 0 });
-const tailMat = new T.MeshStandardMaterial({ color: 0x300006, emissive: 0xff1026, emissiveIntensity: 0 });
-const tailLens = new T.MeshPhysicalMaterial({ color: 0x3a0008, emissive: 0xd00818, emissiveIntensity: 0, metalness: 0.1, roughness: 0.15, clearcoat: 1 });
+const tailMat = new T.MeshStandardMaterial({ color: 0x300004, emissive: 0xff0400, emissiveIntensity: 0 });
+// smoked red outer lens: translucent, so the LED blades and reflector inside stay visible
+const tailLens = new T.MeshPhysicalMaterial({ color: 0x7a0806, emissive: 0x700400, emissiveIntensity: 0, metalness: 0, roughness: 0.04, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.6, transparent: true, opacity: 0.42, depthWrite: false });
+// lower segmented LED row (separate so it can glow a little softer than the blades)
+const tailSeg = new T.MeshStandardMaterial({ color: 0x2a0003, emissive: 0xff0300, emissiveIntensity: 0, roughness: 0.5 });
+// dark chrome reflector behind the LEDs
+const lampHousing = new T.MeshStandardMaterial({ color: 0x1b1d22, metalness: 1, roughness: 0.22, envMapIntensity: 1.1 });
 const drlStrip = new T.MeshStandardMaterial({ color: 0xffffff, emissive: 0xf2f6ff, emissiveIntensity: 0 });
 const lensGlow = new T.MeshPhysicalMaterial({ color: 0x9aa6c0, emissive: 0xcfdcff, emissiveIntensity: 0, metalness: 0.1, roughness: 0.05, clearcoat: 1 });
 const metal = new T.MeshStandardMaterial({ color: 0x9ca2ad, metalness: 0.85, roughness: 0.32, envMapIntensity: 1.2 });
@@ -723,6 +728,12 @@ function onModel(gltf) {
   // lamp covers: clear polycarbonate instead of the tinted body glass, so the LEDs show through
   const clearLens = new T.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, roughness: 0.02, metalness: 0, clearcoat: 1, envMapIntensity: 1.4, depthWrite: false });
   ['headlightL', 'headlightR', 'taillightL', 'taillightR'].forEach(k => { const g = groups[k]; if (g) g.traverse(o => { if (o.isMesh && o.material === realGlass) o.material = clearLens; }); });
+  // tail lamps: dark chrome reflector instead of bright chrome, segmented row gets its own material
+  ['taillightL', 'taillightR'].forEach(k => { const g = groups[k]; if (g) g.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.material === chromeMat) o.material = lampHousing;
+    else if (o.material === tailMat && o.geometry.attributes.position.count > 20000) o.material = tailSeg;
+  }); });
   // soft glint at each DRL strip (follows the lamp, hidden while the car is taken apart)
   ['headlightL', 'headlightR'].forEach(k => {
     const g = groups[k]; if (!g) return;
@@ -953,10 +964,10 @@ function frame() {
   const lamp = ig < 0 ? 0 : flash(ig - 0.95), tail = ig < 0 ? 0 : flash(ig - 1.15);
   renderer.toneMappingExposure = 0.95 * w;
   drl.emissiveIntensity = 2.4 * lamp;
-  tailMat.emissiveIntensity = 1.5 * tail;
+  tailMat.emissiveIntensity = 1.15 * tail;
   beams.forEach(b => b.intensity = 7 * lamp);
   drlStrip.emissiveIntensity = 3.2 * lamp; lensGlow.emissiveIntensity = 0.9 * lamp;
-  tailLens.emissiveIntensity = 0.55 * tail;
+  tailLens.emissiveIntensity = 0.35 * tail; tailSeg.emissiveIntensity = 0.8 * tail;
   glows.forEach(g => { g.material.opacity = 0.7 * lamp * (1 - ss(0.0, 0.08, ex)); });
   const rpm = ig < 0 ? 0 : rpmCurve(ig) + (ig > 2.6 ? tun * 4200 + Math.sin(t * 9) * 25 * (1 - tun) : 0);
   engineUpdate(rpm, tun);

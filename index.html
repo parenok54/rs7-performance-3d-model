@@ -524,7 +524,7 @@ Object.values(parts).forEach(p => p.userData.base = p.position.clone());
 
 
 // ---------- Real 3D model (CC BY, Res1n) ----------
-let modelReady = false, modelFailed = false, useModel = false;
+let modelReady = false, modelFailed = false, useModel = false, spoilerRig = null;
 const drivetrain = ['engine', 'gearbox', 'shaft', 'diff', 'strut', 'battery'];
 const interiorMat = new T.MeshStandardMaterial({ color: 0x141519, roughness: 0.75, metalness: 0.1 });
 const leatherMat = new T.MeshStandardMaterial({ color: 0x2a0a10, roughness: 0.6, metalness: 0.05 });
@@ -742,8 +742,60 @@ function onModel(gltf) {
     const sp = new T.Sprite(new T.SpriteMaterial({ map: glowTex, color: 0xdfe8ff, transparent: true, opacity: 0, depthWrite: false, blending: T.AdditiveBlending }));
     sp.position.set(bx.max.x + 0.02, c.y, c.z); sp.scale.set(0.34, 0.12, 1); g.add(sp); glows.push(sp);
   });
+  buildSpoiler(groups.trunk);
   [paint, realGlass, chromeMat, blackM, sealMat, silverM, interiorMat, leatherMat].forEach(m => { m.userData.op = m.opacity; ghostMats.push(m); });
   useModel = true; modelReady = true;
+}
+// deploying rear spoiler: the model's boot lid is one mesh, so cut its rear lip out into a separate part
+function buildSpoiler(g) {
+  if (!g) return;
+  let lid = null, best = Infinity;
+  g.children.forEach(o => { if (o.isMesh && o.material === paint) { const b = new T.Box3().setFromObject(o); if (b.min.x < best) { best = b.min.x; lid = o; } } });
+  if (!lid) return;
+  const geo = lid.geometry;
+  // read attributes as plain floats (r128 does not de-normalise quantised meshopt attributes in getX)
+  const qOf = at => { const ar = at.array || at.data.array; return !at.normalized ? 1 : ar instanceof Int16Array ? 1 / 32767 : ar instanceof Int8Array ? 1 / 127 : ar instanceof Uint16Array ? 1 / 65535 : ar instanceof Uint8Array ? 1 / 255 : 1; };
+  const keys = ['position', 'normal', 'uv'].filter(k => geo.attributes[k]);
+  const read = (k, i) => { const at = geo.attributes[k], q = qOf(at), o = [at.getX(i) * q, at.getY(i) * q]; if (at.itemSize > 2) o.push(at.getZ(i) * q); return o; };
+  const n = geo.attributes.position.count, gx = new Float32Array(n), v = new T.Vector3();
+  lid.updateMatrix();
+  let mn = Infinity;
+  for (let i = 0; i < n; i++) { v.fromArray(read('position', i)).applyMatrix4(lid.matrix); gx[i] = v.x; if (v.x < mn) mn = v.x; }
+  const cut = mn + 0.12;                         // last ~12 cm of the lid: the lip above the light bar
+  // split every triangle along the plane x = cut, so the seam is a clean straight line
+  const idx = geo.index ? geo.index.array : Array.from({ length: n }, (_, i) => i);
+  const outK = {}, outL = {}; keys.forEach(k => { outK[k] = []; outL[k] = []; });
+  const vert = i => { const o = { d: gx[i] - cut }; keys.forEach(k => o[k] = read(k, i)); return o; };
+  const lerpV = (a, b) => { const t = a.d / (a.d - b.d), o = { d: 0 }; keys.forEach(k => o[k] = a[k].map((x, j) => x + (b[k][j] - x) * t)); return o; };
+  const clip = (tri, keepSide) => {
+    const inside = p => keepSide ? p.d >= 0 : p.d < 0, poly = [];
+    for (let i = 0; i < 3; i++) { const c = tri[i], nx = tri[(i + 1) % 3];
+      if (inside(c)) poly.push(c);
+      if (inside(c) !== inside(nx)) poly.push(lerpV(c, nx)); }
+    return poly;
+  };
+  const emit = (out, poly) => { for (let i = 1; i + 1 < poly.length; i++) [poly[0], poly[i], poly[i + 1]].forEach(p => keys.forEach(k => out[k].push(...p[k]))); };
+  for (let t = 0; t < idx.length; t += 3) {
+    const tri = [vert(idx[t]), vert(idx[t + 1]), vert(idx[t + 2])];
+    emit(outK, clip(tri, true)); emit(outL, clip(tri, false));
+  }
+  if (outL.position.length < 90) return;
+  const build = o => { const g2 = new T.BufferGeometry(); keys.forEach(k => g2.setAttribute(k, new T.Float32BufferAttribute(o[k], k === 'uv' ? 2 : 3))); if (o.normal) g2.attributes.normal.normalized = false; g2.computeBoundingBox(); g2.computeBoundingSphere(); return g2; };
+  lid.geometry = build(outK);
+  const lipGeo = build(outL);
+  // front-top edge of the lip (in the trunk group's space) is the hinge
+  let fx = -Infinity, fy = -Infinity; const lp = lipGeo.attributes.position;
+  for (let i = 0; i < lp.count; i++) { v.fromBufferAttribute(lp, i).applyMatrix4(lid.matrix); fx = Math.max(fx, v.x); fy = Math.max(fy, v.y); }
+  // hinge on the front edge of the lip; the part rises and tilts its trailing edge up
+  const pivot = new T.Group(); pivot.position.set(fx, fy, 0); g.add(pivot);
+  const sp = new T.Mesh(lipGeo, paint);
+  sp.position.copy(lid.position).sub(pivot.position); sp.quaternion.copy(lid.quaternion); sp.scale.copy(lid.scale);
+  sp.castShadow = sp.receiveShadow = true; pivot.add(sp);
+  // dark recess that shows under the raised spoiler
+  const recess = new T.Mesh(lipGeo, new T.MeshStandardMaterial({ color: 0x040405, roughness: 0.9, metalness: 0, side: T.DoubleSide }));
+  recess.position.copy(lid.position); recess.position.y -= 0.008; recess.quaternion.copy(lid.quaternion); recess.scale.copy(lid.scale);
+  recess.visible = false; g.add(recess);
+  spoilerRig = { pivot, recess, y0: pivot.position.y };
 }
 function loadModel() {
   if (!T.GLTFLoader || !window.MeshoptDecoder) { modelFailed = true; return; }
@@ -1016,6 +1068,12 @@ function frame() {
   }
   spoiler.position.y = spoilerBaseY + spoilerUp * 0.07;
   spoiler.rotation.z = -spoilerUp * 0.18;
+  if (spoilerRig) {                              // up in the Design section and whenever the car is "at speed"
+    const u = Math.max(spoilerUp, tun);
+    spoilerRig.pivot.position.y = spoilerRig.y0 + u * 0.045;
+    spoilerRig.pivot.rotation.z = -u * 0.14;
+    spoilerRig.recess.visible = u > 0.002;
+  }
 
   wspin += dt * tun * 26;
   const steerA = Math.sin(t * 1.4) * 0.38 * steer;

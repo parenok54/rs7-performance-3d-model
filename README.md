@@ -8,6 +8,7 @@ An interactive scroll-driven website built around a 3D model of the Audi RS 7 Sp
 - Real-time 3D car rendered in the browser with three.js
 - Scroll-driven storytelling: the camera and model animate as you scroll through sections
 - “X-ray” mode: body panels separate to reveal the engine, turbos, gearbox, differential and air suspension, with labels
+- Deploying rear spoiler: the lip is cut out of the boot lid geometry at load time and rises in the Design and Performance sections
 - Engine start button with sound, mute toggle
 - Interactive 360° viewer and full technical specification table
 - Compressed model (Meshopt) for faster loading

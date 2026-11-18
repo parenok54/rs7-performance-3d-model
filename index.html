@@ -868,6 +868,20 @@ const t0 = performance.now(); let ready = 0;
 // ---------- Ignition sequence + synthesized V8 ----------
 let ignT = -1;                                   // clock time of the button press
 const Eng = { ctx: null, on: false, muted: false };
+// timing (seconds after the button press) — visuals use the same numbers: catch at 0.85 (rpmCurve, shake)
+const CATCH = 0.85, START_ONSET = 0.2;            // the 'start' recording becomes audible 0.2 s into the file
+const REV_OFFSET = 1.8;                          // skip the slow part of the 'rev' recording, start right on the climb
+// decode the recordings ahead of time (AudioBuffers can be played by any context)
+Eng.bufs = (() => {
+  try {
+    const S = window.ENGINE_SND, OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!S || !OAC) return null;
+    const oc = new OAC(1, 1, 44100);
+    const dec = b64 => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; };
+    const load = k => new Promise((res, rej) => oc.decodeAudioData(dec(S[k]), res, rej));
+    const p = Promise.all([load('start'), load('idle'), load('rev')]); p.catch(() => {}); return p;
+  } catch (e) { return null; }
+})();
 function engineStart() {
   try {
     const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
@@ -881,24 +895,28 @@ function engineStart() {
     const crank = ctx.createOscillator(); crank.type = 'square'; crank.frequency.value = 11; const crankG = ctx.createGain(); crankG.gain.value = 0.12;
     crank.connect(crankG); crankG.connect(stG.gain);
     st.connect(stBp); stBp.connect(stG); stG.connect(master);
-    stG.gain.setValueAtTime(0, now); stG.gain.linearRampToValueAtTime(0.22, now + 0.05); stG.gain.setValueAtTime(0.22, now + 0.85); stG.gain.linearRampToValueAtTime(0, now + 1.0);
-    st.start(now); crank.start(now); st.stop(now + 1.05); crank.stop(now + 1.05);
+    stG.gain.setValueAtTime(0, now); stG.gain.linearRampToValueAtTime(0.22, now + 0.05); stG.gain.setValueAtTime(0.22, now + CATCH - 0.05); stG.gain.linearRampToValueAtTime(0, now + CATCH + 0.12);
+    st.start(now); crank.start(now); st.stop(now + CATCH + 0.2); crank.stop(now + CATCH + 0.2);
     // real recording (Ford GT40 V8, djbono / freesound, Sampling+): catch + settle, then a seamless idle loop
     const eq1 = ctx.createBiquadFilter(); eq1.type = 'lowshelf'; eq1.frequency.value = 120; eq1.gain.value = 4;
     const eq2 = ctx.createBiquadFilter(); eq2.type = 'highshelf'; eq2.frequency.value = 1800; eq2.gain.value = 6;
     eq1.connect(eq2); eq2.connect(master);
-    const S = window.ENGINE_SND, dec = b64 => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; };
-    const load = k => new Promise((res, rej) => ctx.decodeAudioData(dec(S[k]), res, rej));
     Eng.bus = eq1; Eng.t0 = now; Eng.on = true;
-    if (S) Promise.all([load('start'), load('idle'), load('rev')]).then(([bs, bi, br]) => {
+    const bufs = Eng.bufs || Promise.reject();
+    bufs.then(([bs, bi, br]) => {
       Eng.revBuf = br;
-      const t1 = Math.max(ctx.currentTime, now + 0.82);
+      // the recording's catch lands exactly on CATCH; if decoding was late, shift the visuals instead
+      const want = now + CATCH - START_ONSET, t1 = Math.max(ctx.currentTime + 0.02, want);
+      if (t1 > want) ignT += t1 - want;
+      Eng.t1 = t1;
       const s1 = ctx.createBufferSource(); s1.buffer = bs; const g1 = ctx.createGain(); g1.gain.value = 1;
       s1.connect(g1); g1.connect(eq1); s1.start(t1);
-      g1.gain.setValueAtTime(1, t1 + 4.6); g1.gain.linearRampToValueAtTime(0, t1 + 5.6);
+      // the recording goes almost silent ~1.8 s in: crossfade into the idle loop before that, no gap
+      g1.gain.setValueAtTime(1, t1 + 1.6); g1.gain.linearRampToValueAtTime(0, t1 + 2.4);
+      s1.stop(t1 + 2.5);
       const idle = ctx.createBufferSource(); idle.buffer = bi; idle.loop = true;
-      const gi = ctx.createGain(); gi.gain.value = 0; idle.connect(gi); gi.connect(eq1); idle.start(t1 + 4.4);
-      gi.gain.setValueAtTime(0, t1 + 4.4); gi.gain.linearRampToValueAtTime(0.9, t1 + 5.6);
+      const gi = ctx.createGain(); gi.gain.value = 0; idle.connect(gi); gi.connect(eq1); idle.start(t1 + 1.4);
+      gi.gain.setValueAtTime(0, t1 + 1.4); gi.gain.linearRampToValueAtTime(0.9, t1 + 2.1);
       Object.assign(Eng, { idle, gi, ready: true });
     }).catch(() => {});
   } catch (e) { Eng.on = false; }
@@ -910,16 +928,24 @@ function rpmCurve(s) {
   if (s < 2.6) return 3000 - (1 - Math.pow(1 - (s - 1.15) / 1.45, 2)) * 2050;
   return 950 - Math.min(1, (s - 2.6) / 1.5) * 200;
 }
-let lastRev = -99;
+let revArmed = true, rev = null;
 function engineUpdate(rpm, tun) {
   if (!Eng.on || !Eng.ctx || !Eng.ready) return;
   const c = Eng.ctx, tt = c.currentTime;
-  Eng.idle.playbackRate.setTargetAtTime(1 + tun * 0.9, tt, 0.15);
-  if (tt - Eng.t0 > 6.6) Eng.gi.gain.setTargetAtTime(0.9 * (1 + tun * 0.5), tt, 0.2);
-  if (tun > 0.35 && tt - lastRev > 9 && Eng.revBuf) {
-    lastRev = tt; const r = c.createBufferSource(); r.buffer = Eng.revBuf; const g = c.createGain(); g.gain.value = 0.9;
-    r.connect(g); g.connect(Eng.bus); r.start();
+  if (tun < 0.1) {
+    revArmed = true;
+    if (rev && tt < rev.end) { rev.g.gain.setTargetAtTime(0, tt, 0.25); rev.end = tt; }   // scrolled away: let the rev fade
   }
+  if (tun > 0.35 && revArmed && Eng.revBuf) {
+    revArmed = false;
+    const r = c.createBufferSource(); r.buffer = Eng.revBuf; const g = c.createGain(); g.gain.value = 0.95;
+    r.connect(g); g.connect(Eng.bus); r.start(tt, REV_OFFSET);
+    rev = { r, g, end: tt + Eng.revBuf.duration - REV_OFFSET - 1.0 };   // idle comes back during the rev's tail
+  }
+  const revving = rev && tt < rev.end;
+  // the idle loop only rises a little in pitch (bigger shifts sound artificial); ducked under the rev
+  Eng.idle.playbackRate.setTargetAtTime(revving ? 1 : 1 + tun * 0.35, tt, 0.3);
+  if (tt > Eng.t1 + 2.2) Eng.gi.gain.setTargetAtTime(revving ? 0.12 : 0.9 * (1 + tun * 0.3), tt, revving ? 0.12 : 0.4);
 }
 function setMuted(m) {
   Eng.muted = m; sndBtn.textContent = m ? 'Sound: off' : 'Sound: on';

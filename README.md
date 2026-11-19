@@ -4,6 +4,15 @@ An interactive scroll-driven website built around a 3D model of the Audi RS 7 Sp
 
 ### 👉 [Live demo](https://parenok54.github.io/rs7-performance-3d-model/)
 
+<p align="center">
+  <img src="images/front34.jpg" width="49%" alt="3D model, front three-quarter view" />
+  <img src="images/rear34.jpg" width="49%" alt="Rear view with the spoiler raised" />
+</p>
+<p align="center">
+  <img src="images/taillights.jpg" width="60%" alt="Detailed LED tail lights" /><br/>
+  <sub>Real-time renders from the site: front, rear with the spoiler deployed, LED tail lights.</sub>
+</p>
+
 ## Features
 - Real-time 3D car rendered in the browser with three.js
 - Scroll-driven storytelling: the camera and model animate as you scroll through sections

@@ -786,23 +786,37 @@ function buildSpoiler(g) {
   const read = (k, i) => { const at = geo.attributes[k], q = qOf(at), o = [at.getX(i) * q, at.getY(i) * q]; if (at.itemSize > 2) o.push(at.getZ(i) * q); return o; };
   const n = geo.attributes.position.count, v = new T.Vector3();
   lid.updateMatrix();
-  // the blade is the upper surface of the lid (as on the real car); the near-vertical rear face with the
-  // Audi rings and the light bar stays on the lid. Split along the crease: triangles facing up go to the blade.
-  const pos = []; let topY = -Infinity;
-  for (let i = 0; i < n; i++) { const p = new T.Vector3().fromArray(read('position', i)).applyMatrix4(lid.matrix); pos.push(p); topY = Math.max(topY, p.y); }
+  // the painted lid is three separate pieces: the vertical rear face (Audi rings, light bar), the strip along
+  // the edge of the boot (the real spoiler) and the panel in front of it up to the glass. Only the strip moves.
+  const pos = [];
+  for (let i = 0; i < n; i++) pos.push(new T.Vector3().fromArray(read('position', i)).applyMatrix4(lid.matrix));
   const idx = geo.index ? geo.index.array : Array.from({ length: n }, (_, i) => i);
-  const outK = {}, outL = {}; keys.forEach(k => { outK[k] = []; outL[k] = []; });
-  const e1 = new T.Vector3(), e2 = new T.Vector3(), bladeTris = [];
+  // connected pieces (vertices welded by position, the mesh has UV seams)
+  const kw = p => Math.round(p.x * 1e4) + ',' + Math.round(p.y * 1e4) + ',' + Math.round(p.z * 1e4);
+  const wid = new Map(), w = pos.map(p => { const k = kw(p); if (!wid.has(k)) wid.set(k, wid.size); return wid.get(k); });
+  const par = new Int32Array(wid.size).map((_, i) => i), root = k => { while (par[k] !== k) { par[k] = par[par[k]]; k = par[k]; } return k; };
+  for (let t = 0; t < idx.length; t += 3) { const r = root(w[idx[t]]); par[root(w[idx[t + 1]])] = r; par[root(w[idx[t + 2]])] = r; }
+  // per piece: how much it faces up and where it sits
+  const e1 = new T.Vector3(), e2 = new T.Vector3(), pieces = new Map();
   for (let t = 0; t < idx.length; t += 3) {
     const a = pos[idx[t]], b = pos[idx[t + 1]], c = pos[idx[t + 2]];
-    e1.subVectors(b, a); e2.subVectors(c, a); e1.cross(e2).normalize();
-    // facing up (or down: the underside gives the blade its thickness) and high on the lid, not the ledge above the lights
-    const blade = Math.abs(e1.y) > 0.7 && (a.y + b.y + c.y) / 3 > topY - 0.11;
+    e1.subVectors(b, a); e2.subVectors(c, a); e1.cross(e2);
+    const ar = e1.length(), r = root(w[idx[t]]), o = pieces.get(r) || { a: 0, up: 0, x: 0 };
+    o.a += ar; o.up += Math.abs(e1.y); o.x += (a.x + b.x + c.x) / 3 * ar; pieces.set(r, o);
+  }
+  // the spoiler strip = the rearmost piece that faces up (the rear face is vertical, the front panel sits further forward)
+  let bladeId = -1, bestX = Infinity;
+  pieces.forEach((o, r) => { if (o.a > 0 && o.up / o.a > 0.6 && o.x / o.a < bestX) { bestX = o.x / o.a; bladeId = r; } });
+  const outK = {}, outL = {}; keys.forEach(k => { outK[k] = []; outL[k] = []; });
+  const bladeTris = [];
+  for (let t = 0; t < idx.length; t += 3) {
+    const blade = root(w[idx[t]]) === bladeId;
     if (blade) bladeTris.push([idx[t], idx[t + 1], idx[t + 2]]);
     const out = blade ? outL : outK;
     [idx[t], idx[t + 1], idx[t + 2]].forEach(i => keys.forEach(k => out[k].push(...read(k, i))));
   }
-  if (outL.position.length < 90) return;  const build = o => { const g2 = new T.BufferGeometry(); keys.forEach(k => g2.setAttribute(k, new T.Float32BufferAttribute(o[k], k === 'uv' ? 2 : 3))); if (o.normal) g2.attributes.normal.normalized = false; g2.computeBoundingBox(); g2.computeBoundingSphere(); return g2; };
+  if (outL.position.length < 90) return;
+  const build = o => { const g2 = new T.BufferGeometry(); keys.forEach(k => g2.setAttribute(k, new T.Float32BufferAttribute(o[k], k === 'uv' ? 2 : 3))); if (o.normal) g2.attributes.normal.normalized = false; g2.computeBoundingBox(); g2.computeBoundingSphere(); return g2; };
   lid.geometry = build(outK);
   const lipGeo = build(outL);
   // front-top edge of the lip (in the trunk group's space) is the hinge
@@ -1155,8 +1169,8 @@ function frame() {
   spoiler.rotation.z = -spoilerUp * 0.18;
   if (spoilerRig) {                              // up in the Design section and whenever the car is "at speed"
     const u = Math.max(spoilerUp, tun);
-    // lifts almost parallel, trailing edge a little higher (like the real car: ~6 cm at the front, ~9 cm at the back)
-    const lift = u * 0.06, tilt = u * 0.08;
+    // like the real car: the strip hinges up at an angle, front edge barely moves, trailing edge rises ~8 cm
+    const lift = u * 0.02, tilt = u * 0.26;
     spoilerRig.pivot.position.y = spoilerRig.y0 + lift;
     spoilerRig.pivot.rotation.z = -tilt;
     spoilerRig.recess.visible = spoilerRig.skin.visible = u > 0.002;

@@ -784,30 +784,26 @@ function buildSpoiler(g) {
   const qOf = at => { const ar = at.array || at.data.array; return !at.normalized ? 1 : ar instanceof Int16Array ? 1 / 32767 : ar instanceof Int8Array ? 1 / 127 : ar instanceof Uint16Array ? 1 / 65535 : ar instanceof Uint8Array ? 1 / 255 : 1; };
   const keys = ['position', 'normal', 'uv'].filter(k => geo.attributes[k]);
   const read = (k, i) => { const at = geo.attributes[k], q = qOf(at), o = [at.getX(i) * q, at.getY(i) * q]; if (at.itemSize > 2) o.push(at.getZ(i) * q); return o; };
-  const n = geo.attributes.position.count, gx = new Float32Array(n), v = new T.Vector3();
+  const n = geo.attributes.position.count, v = new T.Vector3();
   lid.updateMatrix();
-  let mn = Infinity;
-  for (let i = 0; i < n; i++) { v.fromArray(read('position', i)).applyMatrix4(lid.matrix); gx[i] = v.x; if (v.x < mn) mn = v.x; }
-  const cut = mn + 0.12;                         // last ~12 cm of the lid: the lip above the light bar
-  // split every triangle along the plane x = cut, so the seam is a clean straight line
+  // the blade is the upper surface of the lid (as on the real car); the near-vertical rear face with the
+  // Audi rings and the light bar stays on the lid. Split along the crease: triangles facing up go to the blade.
+  const pos = []; let topY = -Infinity;
+  for (let i = 0; i < n; i++) { const p = new T.Vector3().fromArray(read('position', i)).applyMatrix4(lid.matrix); pos.push(p); topY = Math.max(topY, p.y); }
   const idx = geo.index ? geo.index.array : Array.from({ length: n }, (_, i) => i);
   const outK = {}, outL = {}; keys.forEach(k => { outK[k] = []; outL[k] = []; });
-  const vert = i => { const o = { d: gx[i] - cut }; keys.forEach(k => o[k] = read(k, i)); return o; };
-  const lerpV = (a, b) => { const t = a.d / (a.d - b.d), o = { d: 0 }; keys.forEach(k => o[k] = a[k].map((x, j) => x + (b[k][j] - x) * t)); return o; };
-  const clip = (tri, keepSide) => {
-    const inside = p => keepSide ? p.d >= 0 : p.d < 0, poly = [];
-    for (let i = 0; i < 3; i++) { const c = tri[i], nx = tri[(i + 1) % 3];
-      if (inside(c)) poly.push(c);
-      if (inside(c) !== inside(nx)) poly.push(lerpV(c, nx)); }
-    return poly;
-  };
-  const emit = (out, poly) => { for (let i = 1; i + 1 < poly.length; i++) [poly[0], poly[i], poly[i + 1]].forEach(p => keys.forEach(k => out[k].push(...p[k]))); };
+  const e1 = new T.Vector3(), e2 = new T.Vector3(), bladeTris = [];
   for (let t = 0; t < idx.length; t += 3) {
-    const tri = [vert(idx[t]), vert(idx[t + 1]), vert(idx[t + 2])];
-    emit(outK, clip(tri, true)); emit(outL, clip(tri, false));
+    const a = pos[idx[t]], b = pos[idx[t + 1]], c = pos[idx[t + 2]];
+    e1.subVectors(b, a); e2.subVectors(c, a); e1.cross(e2).normalize();
+    // facing up (or down: the underside gives the blade its thickness) and high on the lid, not the ledge above the lights
+    // the lid tapers to points at the sides; the blade stops short of them so its ends are blunt, not slivers
+    const blade = Math.abs(e1.y) > 0.7 && (a.y + b.y + c.y) / 3 > topY - 0.11 && Math.abs(a.z + b.z + c.z) / 3 < 0.55;
+    if (blade) bladeTris.push([idx[t], idx[t + 1], idx[t + 2]]);
+    const out = blade ? outL : outK;
+    [idx[t], idx[t + 1], idx[t + 2]].forEach(i => keys.forEach(k => out[k].push(...read(k, i))));
   }
-  if (outL.position.length < 90) return;
-  const build = o => { const g2 = new T.BufferGeometry(); keys.forEach(k => g2.setAttribute(k, new T.Float32BufferAttribute(o[k], k === 'uv' ? 2 : 3))); if (o.normal) g2.attributes.normal.normalized = false; g2.computeBoundingBox(); g2.computeBoundingSphere(); return g2; };
+  if (outL.position.length < 90) return;  const build = o => { const g2 = new T.BufferGeometry(); keys.forEach(k => g2.setAttribute(k, new T.Float32BufferAttribute(o[k], k === 'uv' ? 2 : 3))); if (o.normal) g2.attributes.normal.normalized = false; g2.computeBoundingBox(); g2.computeBoundingSphere(); return g2; };
   lid.geometry = build(outK);
   const lipGeo = build(outL);
   // front-top edge of the lip (in the trunk group's space) is the hinge
@@ -818,8 +814,20 @@ function buildSpoiler(g) {
   const sp = new T.Mesh(lipGeo, paint);
   sp.position.copy(lid.position).sub(pivot.position); sp.quaternion.copy(lid.quaternion); sp.scale.copy(lid.scale);
   sp.castShadow = sp.receiveShadow = true; pivot.add(sp);
-  // other boot-lid parts mounted on the lip (the Audi rings share a mesh with the 3rd brake light housing):
-  // move the triangles that sit fully on the lip, above the light bar, onto the spoiler
+  // the lid is a single sheet: give the blade a real thickness (underside + walls along its outline),
+  // otherwise it reads as a paper-thin sliver when seen edge-on
+  const TH = 0.016, kp = p => Math.round(p.x * 1e4) + ',' + Math.round(p.y * 1e4) + ',' + Math.round(p.z * 1e4), edges = new Map(), skin = [];
+  bladeTris.forEach(tr => [[0, 1], [1, 2], [2, 0]].forEach(([u, w]) => {
+    const a = pos[tr[u]], b = pos[tr[w]], ka = kp(a), kb = kp(b), key = ka < kb ? ka + '|' + kb : kb + '|' + ka;
+    const e = edges.get(key); if (e) e.n++; else edges.set(key, { n: 1, a, b });
+  }));
+  const dn = p => new T.Vector3(p.x, p.y - TH, p.z);
+  edges.forEach(e => { if (e.n === 1) skin.push(e.a, e.b, dn(e.b), e.a, dn(e.b), dn(e.a)); });   // walls on the outline only
+  bladeTris.forEach(tr => [2, 1, 0].forEach(k => skin.push(dn(pos[tr[k]]))));                 // underside
+  const skinGeo = new T.BufferGeometry().setFromPoints(skin); skinGeo.computeVertexNormals();
+  const skinMesh = new T.Mesh(skinGeo, paint); skinMesh.position.copy(pivot.position).negate();   // positions are in the lid group's space
+  skinMesh.castShadow = skinMesh.receiveShadow = true; skinMesh.visible = false; pivot.add(skinMesh);   // shown only when raised (folded, its walls would sit inside the rear face)
+  // small parts that sit entirely on the blade's top surface ride with it (the rings are below it and stay)
   g.children.slice().forEach(o => {
     if (!o.isMesh || o === lid || o.material === paint) return;
     const gm = o.geometry, ps = gm.attributes.position, qq = qOf(ps), m = o.count || ps.count;
@@ -831,21 +839,33 @@ function buildSpoiler(g) {
     const par = new Int32Array(cnt).map((_, i) => i), find = k => { while (par[k] !== k) { par[k] = par[par[k]]; k = par[k]; } return k; };
     for (let t = 0; t < ix.length; t += 3) { const a = find(ix[t]); par[find(ix[t + 1])] = a; par[find(ix[t + 2])] = a; }
     const bad = new Uint8Array(cnt);
-    for (let i = 0; i < cnt; i++) if (!(ox[i] < cut && oy[i] > ly - 0.01)) bad[find(i)] = 1;
+    for (let i = 0; i < cnt; i++) if (!(ox[i] <= fx + 0.005 && oy[i] > ly + 0.01)) bad[find(i)] = 1;
     for (let t = 0; t < ix.length; t += 3) (bad[find(ix[t])] ? stay : go).push(ix[t], ix[t + 1], ix[t + 2]);
-    if (!go.length) return;
-    const sub = new T.BufferGeometry(); Object.keys(gm.attributes).forEach(k => sub.setAttribute(k, gm.attributes[k])); sub.setIndex(go);
+    if (!go.length) return;    const sub = new T.BufferGeometry(); Object.keys(gm.attributes).forEach(k => sub.setAttribute(k, gm.attributes[k])); sub.setIndex(go);
     if (gm.boundingBox) sub.boundingBox = gm.boundingBox.clone(); if (gm.boundingSphere) sub.boundingSphere = gm.boundingSphere.clone();
     if (stay.length) gm.setIndex(stay); else o.visible = false;
     const c = new T.Mesh(sub, o.material);
     c.position.copy(o.position).sub(pivot.position); c.quaternion.copy(o.quaternion); c.scale.copy(o.scale);
     c.castShadow = c.receiveShadow = true; pivot.add(c);
   });
-  // dark recess that shows under the raised spoiler
-  const recess = new T.Mesh(lipGeo, new T.MeshStandardMaterial({ color: 0x040405, roughness: 0.9, metalness: 0, side: T.DoubleSide }));
-  recess.position.copy(lid.position); recess.position.y -= 0.008; recess.quaternion.copy(lid.quaternion); recess.scale.copy(lid.scale);
-  recess.visible = false; g.add(recess);
-  spoilerRig = { pivot, recess, y0: pivot.position.y };
+  // body-coloured bed the blade lifts off (closes the hole left in the lid), slightly lower than the blade
+  const recess = new T.Group(); g.add(recess); recess.visible = false;
+  const bed = new T.Mesh(lipGeo, paint);
+  bed.position.copy(lid.position); bed.position.y -= 0.02; bed.quaternion.copy(lid.quaternion); bed.scale.copy(lid.scale);
+  recess.add(bed);
+  // two black struts between the bed and the blade, stretched every frame to the current gap
+  const strutMat = new T.MeshStandardMaterial({ color: 0x0b0c0f, metalness: 0.4, roughness: 0.5 });
+  const struts = [];
+  let lx0 = Infinity; for (let i = 0; i < lp.count; i++) { v.fromBufferAttribute(lp, i).applyMatrix4(lid.matrix); lx0 = Math.min(lx0, v.x); }
+  const sx = fx - (fx - lx0) * 0.45;                // a bit behind the middle of the blade
+  [1, -1].forEach(sd => {
+    const sz = sd * 0.3; let sy = -Infinity;
+    for (let i = 0; i < lp.count; i++) { v.fromBufferAttribute(lp, i).applyMatrix4(lid.matrix); if (Math.abs(v.x - sx) < 0.03 && Math.abs(v.z - sz) < 0.06) sy = Math.max(sy, v.y); }
+    if (!isFinite(sy)) return;
+    const m = new T.Mesh(new T.BoxGeometry(0.035, 1, 0.012), strutMat); m.position.set(sx, sy, sz); recess.add(m);
+    struts.push({ m, y: sy - 0.02, arm: fx - sx });       // from the bed up to the blade's underside
+  });
+  spoilerRig = { pivot, recess, struts, skin: skinMesh, y0: pivot.position.y };
 }
 function loadModel() {
   if (!T.GLTFLoader || !window.MeshoptDecoder) { modelFailed = true; return; }
@@ -1133,9 +1153,13 @@ function frame() {
   spoiler.rotation.z = -spoilerUp * 0.18;
   if (spoilerRig) {                              // up in the Design section and whenever the car is "at speed"
     const u = Math.max(spoilerUp, tun);
-    spoilerRig.pivot.position.y = spoilerRig.y0 + u * 0.045;
-    spoilerRig.pivot.rotation.z = -u * 0.14;
-    spoilerRig.recess.visible = u > 0.002;
+    // lifts almost parallel, trailing edge a little higher (like the real car: ~6 cm at the front, ~9 cm at the back)
+    const lift = u * 0.06, tilt = u * 0.08;
+    spoilerRig.pivot.position.y = spoilerRig.y0 + lift;
+    spoilerRig.pivot.rotation.z = -tilt;
+    spoilerRig.recess.visible = spoilerRig.skin.visible = u > 0.002;
+    // struts stop a few mm short of both surfaces so their ends never poke through the curved panels
+    spoilerRig.struts.forEach(s => { const gap = lift + s.arm * Math.sin(tilt) + 0.004; s.m.scale.y = Math.max(0.001, gap - 0.006); s.m.position.y = s.y + gap / 2; s.m.visible = gap > 0.03; });
   }
 
   wspin += dt * tun * 26;

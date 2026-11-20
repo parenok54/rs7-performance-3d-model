@@ -547,7 +547,7 @@ Object.values(parts).forEach(p => p.userData.base = p.position.clone());
 
 
 // ---------- Real 3D model (CC BY, Res1n) ----------
-let modelReady = false, modelFailed = false, useModel = false, spoilerRig = null;
+let modelReady = false, modelFailed = false, useModel = false, spoilerRig = null, bladeMat = null;
 const drivetrain = ['engine', 'gearbox', 'shaft', 'diff', 'strut', 'battery'];
 const interiorMat = new T.MeshStandardMaterial({ color: 0x141519, roughness: 0.75, metalness: 0.1 });
 const leatherMat = new T.MeshStandardMaterial({ color: 0x2a0a10, roughness: 0.6, metalness: 0.05 });
@@ -770,7 +770,7 @@ function onModel(gltf) {
     sp.position.set(bx.max.x + 0.02, c.y, c.z); sp.scale.set(0.34, 0.12, 1); g.add(sp); glows.push(sp);
   });
   buildSpoiler(groups.trunk);
-  [paint, realGlass, chromeMat, blackM, sealMat, silverM, interiorMat, leatherMat].forEach(m => { m.userData.op = m.opacity; ghostMats.push(m); });
+  [paint, realGlass, chromeMat, blackM, sealMat, silverM, interiorMat, leatherMat, bladeMat].filter(Boolean).forEach(m => { m.userData.op = m.opacity; ghostMats.push(m); });
   useModel = true; modelReady = true;
 }
 // deploying rear spoiler: the model's boot lid is one mesh, so cut its rear lip out into a separate part
@@ -797,8 +797,7 @@ function buildSpoiler(g) {
     const a = pos[idx[t]], b = pos[idx[t + 1]], c = pos[idx[t + 2]];
     e1.subVectors(b, a); e2.subVectors(c, a); e1.cross(e2).normalize();
     // facing up (or down: the underside gives the blade its thickness) and high on the lid, not the ledge above the lights
-    // the lid tapers to points at the sides; the blade stops short of them so its ends are blunt, not slivers
-    const blade = Math.abs(e1.y) > 0.7 && (a.y + b.y + c.y) / 3 > topY - 0.11 && Math.abs(a.z + b.z + c.z) / 3 < 0.55;
+    const blade = Math.abs(e1.y) > 0.7 && (a.y + b.y + c.y) / 3 > topY - 0.11;
     if (blade) bladeTris.push([idx[t], idx[t + 1], idx[t + 2]]);
     const out = blade ? outL : outK;
     [idx[t], idx[t + 1], idx[t + 2]].forEach(i => keys.forEach(k => out[k].push(...read(k, i))));
@@ -811,7 +810,10 @@ function buildSpoiler(g) {
   for (let i = 0; i < lp.count; i++) { v.fromBufferAttribute(lp, i).applyMatrix4(lid.matrix); fx = Math.max(fx, v.x); fy = Math.max(fy, v.y); ly = Math.min(ly, v.y); }
   // hinge on the front edge of the lip; the part rises and tilts its trailing edge up
   const pivot = new T.Group(); pivot.position.set(fx, fy, 0); g.add(pivot);
-  const sp = new T.Mesh(lipGeo, paint);
+  // own copy of the paint with softer reflections: seen from behind the blade is at a grazing angle and
+  // would mirror the bright studio horizon, reading as a grey plank instead of body colour
+  bladeMat = paint.clone(); bladeMat.envMapIntensity = 0.7; bladeMat.clearcoat = 0.6;
+  const sp = new T.Mesh(lipGeo, bladeMat);
   sp.position.copy(lid.position).sub(pivot.position); sp.quaternion.copy(lid.quaternion); sp.scale.copy(lid.scale);
   sp.castShadow = sp.receiveShadow = true; pivot.add(sp);
   // the lid is a single sheet: give the blade a real thickness (underside + walls along its outline),
@@ -825,7 +827,7 @@ function buildSpoiler(g) {
   edges.forEach(e => { if (e.n === 1) skin.push(e.a, e.b, dn(e.b), e.a, dn(e.b), dn(e.a)); });   // walls on the outline only
   bladeTris.forEach(tr => [2, 1, 0].forEach(k => skin.push(dn(pos[tr[k]]))));                 // underside
   const skinGeo = new T.BufferGeometry().setFromPoints(skin); skinGeo.computeVertexNormals();
-  const skinMesh = new T.Mesh(skinGeo, paint); skinMesh.position.copy(pivot.position).negate();   // positions are in the lid group's space
+  const skinMesh = new T.Mesh(skinGeo, bladeMat); skinMesh.position.copy(pivot.position).negate();   // positions are in the lid group's space
   skinMesh.castShadow = skinMesh.receiveShadow = true; skinMesh.visible = false; pivot.add(skinMesh);   // shown only when raised (folded, its walls would sit inside the rear face)
   // small parts that sit entirely on the blade's top surface ride with it (the rings are below it and stay)
   g.children.slice().forEach(o => {
@@ -865,7 +867,7 @@ function buildSpoiler(g) {
     const m = new T.Mesh(new T.BoxGeometry(0.035, 1, 0.012), strutMat); m.position.set(sx, sy, sz); recess.add(m);
     struts.push({ m, y: sy - 0.02, arm: fx - sx });       // from the bed up to the blade's underside
   });
-  spoilerRig = { pivot, recess, struts, skin: skinMesh, y0: pivot.position.y };
+  spoilerRig = { pivot, recess, struts, skin: skinMesh, blade: sp, y0: pivot.position.y };
 }
 function loadModel() {
   if (!T.GLTFLoader || !window.MeshoptDecoder) { modelFailed = true; return; }
@@ -1158,6 +1160,7 @@ function frame() {
     spoilerRig.pivot.position.y = spoilerRig.y0 + lift;
     spoilerRig.pivot.rotation.z = -tilt;
     spoilerRig.recess.visible = spoilerRig.skin.visible = u > 0.002;
+    spoilerRig.blade.material = u > 0.002 ? bladeMat : paint;   // folded it must match the lid exactly
     // struts stop a few mm short of both surfaces so their ends never poke through the curved panels
     spoilerRig.struts.forEach(s => { const gap = lift + s.arm * Math.sin(tilt) + 0.004; s.m.scale.y = Math.max(0.001, gap - 0.006); s.m.position.y = s.y + gap / 2; s.m.visible = gap > 0.03; });
   }

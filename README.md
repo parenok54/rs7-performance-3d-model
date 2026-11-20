@@ -21,6 +21,11 @@ An interactive scroll-driven website built around a 3D model of the Audi RS 7 Sp
 - Engine start button with sound, mute toggle
 - Interactive 360° viewer and full technical specification table
 - Compressed model (Meshopt) for faster loading
+- Device-aware quality:
+  - **Phones and tablets** load a lighter model (half the triangles, 4.2 MB instead of 7 MB) with gently simplified body panels, so reflections stay clean, and skip real-time shadows (a soft contact shadow stays)
+  - **Desktops and laptops** get the full 1.3M-triangle model, supersampling on standard-DPI screens, 4096 px soft shadows and smoother procedural parts
+  - Render resolution adapts automatically if the frame rate drops below 45 fps
+  - Force a tier for testing with `?q=low` or `?q=high`
 - Works on desktop and mobile, no build step — plain HTML, CSS and JavaScript
 
 ## Tech stack

@@ -247,14 +247,34 @@
 if (!window.THREE) { document.getElementById('err').style.display = 'flex'; return; }
 const T = THREE, PI = Math.PI;
 const canvas = document.getElementById('gl');
+// ---------- Quality tier ----------
+// phones/tablets: lighter model, no real-time shadows, lower render scale
+// desktops/laptops: full model, supersampling on low-DPI screens, 4K shadows, smoother procedural parts
+// ?q=low / ?q=high forces a tier (for testing)
+const qArg = new URLSearchParams(location.search).get('q');
+const touch = matchMedia('(pointer: coarse)').matches && !matchMedia('(pointer: fine)').matches;
+const MOBILE = qArg ? qArg === 'low' : touch || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+const Q = MOBILE
+  ? { model: 'car_c8v3_lite.js?v=lite-1', shadows: false, shadowMap: 0, prMax: Math.min(devicePixelRatio, 1.5), prMin: 1, seg: 1, envH: 512 }
+  : { model: 'car_c8v3.js?v=c8-3', shadows: true, shadowMap: 4096, prMax: Math.min(Math.max(devicePixelRatio, 1.5), 2), prMin: Math.min(devicePixelRatio, 1), seg: 2, envH: 1024 };
 let renderer;
-try { renderer = new T.WebGLRenderer({ canvas, antialias: true }); } catch (e) { document.getElementById('err').style.display = 'flex'; return; }
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+try { renderer = new T.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' }); } catch (e) { document.getElementById('err').style.display = 'flex'; return; }
+let pr = Q.prMax;
+renderer.setPixelRatio(pr);
 renderer.outputEncoding = T.sRGBEncoding;
 renderer.toneMapping = T.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0;
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = Q.shadows;
 renderer.shadowMap.type = T.PCFSoftShadowMap;
+// desktop: round parts (cylinders, spheres, tori, discs) get twice the segments, so close-ups stay smooth
+if (Q.seg !== 1) {
+  const s = n => Math.max(3, Math.round((n || 8) * Q.seg));
+  const C = T.CylinderGeometry, S = T.SphereGeometry, To = T.TorusGeometry, Ci = T.CircleGeometry;
+  T.CylinderGeometry = class extends C { constructor(a, b, h, r, ...x) { super(a, b, h, s(r), ...x); } };
+  T.SphereGeometry = class extends S { constructor(r, w, h, ...x) { super(r, s(w), s(h || 6), ...x); } };
+  T.TorusGeometry = class extends To { constructor(r, t, a, b, ...x) { super(r, t, s(a), s(b), ...x); } };
+  T.CircleGeometry = class extends Ci { constructor(r, n, ...x) { super(r, s(n), ...x); } };
+}
 
 const BG = 0x05060a;
 const scene = new T.Scene();
@@ -266,11 +286,11 @@ const camera = new T.PerspectiveCamera(36, 1, 0.1, 200);
 const env = new T.Scene();
 // studio sphere: dark floor, soft grey horizon, darker ceiling — gives the paint a clean reflection line
 {
-  const c = document.createElement('canvas'); c.width = 16; c.height = 512; const g = c.getContext('2d');
-  const gr = g.createLinearGradient(0, 0, 0, 512);
+  const c = document.createElement('canvas'); c.width = 16; c.height = Q.envH; const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0, 0, 0, Q.envH);
   gr.addColorStop(0, '#0b0d14'); gr.addColorStop(0.38, '#2a2f3c'); gr.addColorStop(0.49, '#9aa3b8');
   gr.addColorStop(0.52, '#3a4050'); gr.addColorStop(0.7, '#0a0b10'); gr.addColorStop(1, '#030305');
-  g.fillStyle = gr; g.fillRect(0, 0, 16, 512);
+  g.fillStyle = gr; g.fillRect(0, 0, 16, Q.envH);
   const tex = new T.CanvasTexture(c); tex.encoding = T.sRGBEncoding;
   env.add(new T.Mesh(new T.SphereGeometry(30, 48, 24), new T.MeshBasicMaterial({ map: tex, side: T.BackSide })));
 }
@@ -290,10 +310,13 @@ scene.environment = pmrem.fromScene(env, 0.02).texture;
 // ---------- Lights ----------
 scene.add(new T.HemisphereLight(0x9fb4ff, 0x050608, 0.35));
 const key = new T.DirectionalLight(0xffffff, 1.1);
-key.position.set(4, 9, 5); key.castShadow = true;
-key.shadow.mapSize.set(innerWidth < 800 ? 1024 : 2048, innerWidth < 800 ? 1024 : 2048);
-Object.assign(key.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 30 });
-key.shadow.bias = -0.0004;
+key.position.set(4, 9, 5); key.castShadow = Q.shadows;
+if (Q.shadows) {
+  key.shadow.mapSize.set(Q.shadowMap, Q.shadowMap);
+  // tight frustum around the car (and its exploded parts) so every shadow texel lands on something useful
+  Object.assign(key.shadow.camera, { left: -5, right: 5, top: 5, bottom: -5, near: 3, far: 20 });
+  key.shadow.bias = -0.00025; key.shadow.normalBias = 0.01;
+}
 scene.add(key);
 const rim = new T.SpotLight(0x5f86ff, 3, 30, 0.6, 0.6);
 rim.position.set(-7, 3, -6); scene.add(rim);
@@ -693,7 +716,7 @@ function onModel(gltf) {
   const grp = k => { if (!groups[k]) { groups[k] = new T.Group(); car.add(groups[k]); } return groups[k]; };
   meshes.forEach(o => {
     const m = matMap[mname(o)]; if (m) o.material = m;
-    o.castShadow = true; o.receiveShadow = true;
+    o.castShadow = Q.shadows; o.receiveShadow = Q.shadows;
     let w = owner(o), target;
     // climb to the closest named ancestor and decide where the mesh lives
     let p = o, key = null;
@@ -729,11 +752,15 @@ function onModel(gltf) {
   const clearLens = new T.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, roughness: 0.02, metalness: 0, clearcoat: 1, envMapIntensity: 1.4, depthWrite: false });
   ['headlightL', 'headlightR', 'taillightL', 'taillightR'].forEach(k => { const g = groups[k]; if (g) g.traverse(o => { if (o.isMesh && o.material === realGlass) o.material = clearLens; }); });
   // tail lamps: dark chrome reflector instead of bright chrome, segmented row gets its own material
-  ['taillightL', 'taillightR'].forEach(k => { const g = groups[k]; if (g) g.traverse(o => {
-    if (!o.isMesh) return;
-    if (o.material === chromeMat) o.material = lampHousing;
-    else if (o.material === tailMat && o.geometry.attributes.position.count > 20000) o.material = tailSeg;
-  }); });
+  // (the segmented row is the densest red-LED mesh in each lamp; picked by rank, not a fixed vertex count, so it works for the phone model too)
+  ['taillightL', 'taillightR'].forEach(k => { const g = groups[k]; if (!g) return; let seg = null;
+    g.traverse(o => {
+      if (!o.isMesh) return;
+      if (o.material === chromeMat) o.material = lampHousing;
+      else if (o.material === tailMat && (!seg || o.geometry.attributes.position.count > seg.geometry.attributes.position.count)) seg = o;
+    });
+    if (seg) seg.material = tailSeg;
+  });
   // soft glint at each DRL strip (follows the lamp, hidden while the car is taken apart)
   ['headlightL', 'headlightR'].forEach(k => {
     const g = groups[k]; if (!g) return;
@@ -823,7 +850,7 @@ function buildSpoiler(g) {
 function loadModel() {
   if (!T.GLTFLoader || !window.MeshoptDecoder) { modelFailed = true; return; }
   const go = () => {
-    const sc = document.createElement('script'); sc.src = 'car_c8v3.js?v=c8-3';
+    const sc = document.createElement('script'); sc.src = Q.model;
     sc.onload = () => {
       try {
         const bin = atob(window.CAR_GLB_B64), buf = new Uint8Array(bin.length);
@@ -1044,8 +1071,21 @@ const beams = [];
 let cur = 0, wspin = 0, wake = 0;
 const clock = new T.Clock(), v = new T.Vector3();
 
+// ---------- Adaptive render scale ----------
+// measures real fps once a second; slow GPU -> render scale steps down by 0.25, plenty of headroom -> back up
+let fAcc = 0, fN = 0, calm = 0, drops = 0;
+function adapt(raw) {
+  if (!ready || document.hidden || raw > 0.25) return;
+  fAcc += raw; fN++;
+  if (fAcc < 1) return;
+  const fps = fN / fAcc; fAcc = 0; fN = 0;
+  if (fps < 45 && pr > Q.prMin) { pr = Math.max(Q.prMin, pr - 0.25); renderer.setPixelRatio(pr); calm = 0; drops++; }
+  else if (fps > 57 && pr < Q.prMax && drops < 2 && ++calm >= 4) { pr = Math.min(Q.prMax, pr + 0.25); renderer.setPixelRatio(pr); calm = 0; }
+}
+
 function frame() {
-  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+  const raw = clock.getDelta(), dt = Math.min(raw, 0.05), t = clock.elapsedTime;
+  adapt(raw);
   const max = story.offsetHeight - innerHeight;
   const target = T.MathUtils.clamp(scrollY / max, 0, 1);
   cur += (target - cur) * Math.min(1, dt * 4.5);
